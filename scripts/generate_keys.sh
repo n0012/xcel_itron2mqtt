@@ -21,7 +21,7 @@ generate_new_keys()
 {
     # Generate new TLS1.2 keys for Xcel meter
     echo "Generating new keys!"
-    openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout ${CERT_DIR}/${KEY_FILENAME} -out ${CERT_DIR}/${CERT_FILENAME} -sha256 -days 1094 -subj '/CN=MeterReaderHanClient' -addext "certificatePolicies = critical,1.3.6.1.4.1.40732.2.2" -addext "keyUsage = critical,digitalSignature"
+    openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout ${CERT_DIR}/${KEY_FILENAME} -out ${CERT_DIR}/${CERT_FILENAME} -sha256 -days 7300 -subj '/CN=MeterReaderHanClient' -addext "certificatePolicies = critical,1.3.6.1.4.1.40732.2.2" -addext "keyUsage = critical,digitalSignature"
 }
 
 print_LFDI()
