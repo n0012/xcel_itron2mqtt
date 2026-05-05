@@ -1,6 +1,6 @@
 #!/bin/sh
 # Some constants
-readonly CERT_DIR=certs
+CERT_DIR="${CERT_DIR:-certs}"
 readonly CERT_FILENAME=.cert.pem
 readonly KEY_FILENAME=.key.pem
 
@@ -13,7 +13,11 @@ Help()
     echo "Syntax: $0"
     echo "options:"
     echo "  -p     Print LFDI string"
+    echo "  -n     Non-interactive: generate only if certs are missing, never prompt"
     echo "  -h     Print this Help."
+    echo
+    echo "environment:"
+    echo "  CERT_DIR   Directory to read/write cert and key (default: certs)"
     echo
 }
 
@@ -31,18 +35,32 @@ print_LFDI()
     openssl x509 -noout -fingerprint -SHA256 -inform pem -in ${CERT_DIR}/${CERT_FILENAME} | sed -e 's/://g' -e 's/SHA256 Fingerprint=//g' | cut -c1-40
 }
 
-while getopts "ph" option; do
+NON_INTERACTIVE=0
+while getopts "pnh" option; do
     case "${option}" in
         p) # Print LFDI
             print_LFDI
             exit;;
+        n) # Non-interactive
+            NON_INTERACTIVE=1
+            ;;
         h | *)
             Help
             exit;;
     esac
 done
 
+if [ ! -d "${CERT_DIR}" ]; then
+    echo "${CERT_DIR} DOES NOT exist, creating now."
+    mkdir -p ${CERT_DIR}
+fi
+
 if [ -f "${CERT_DIR}/${CERT_FILENAME}" ] && [ -f "${CERT_DIR}/${KEY_FILENAME}" ]; then
+    if [ ${NON_INTERACTIVE} -eq 1 ]; then
+        echo "Existing cert and key found in ${CERT_DIR}/, keeping them."
+        print_LFDI
+        exit
+    fi
     echo "Looks like you have already generated your cert and key files."
     read -p "Would you like to overwrite your existing credentials? [Y/n] ", REPLY
     if [ -z "${REPLY}" ]; then REPLY="Y"; fi
@@ -51,11 +69,6 @@ if [ -f "${CERT_DIR}/${CERT_FILENAME}" ] && [ -f "${CERT_DIR}/${KEY_FILENAME}" ]
         print_LFDI
     fi
     exit
-fi
-
-if [ ! -d "${CERT_DIR}" ]; then
-    echo "${CERT_DIR} DOES NOT exist, creating now."
-    mkdir -p ${CERT_DIR}
 fi
 
 generate_new_keys
