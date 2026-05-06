@@ -4,6 +4,7 @@ import yaml
 import json
 import requests
 import logging
+import urllib3
 import paho.mqtt.client as mqtt
 import xml.etree.ElementTree as ET
 from time import sleep
@@ -14,12 +15,11 @@ from requests.packages.urllib3.util.ssl_ import create_urllib3_context
 from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, before_sleep_log, wait_exponential
 
-# Local imports
-from xcelEndpoint import xcelEndpoint
+# Meter uses a self-signed cert; verification is intentionally disabled at the session level
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-IEEE_PREFIX = '{urn:ieee:std:2030.5:ns}'
-# Stuffing the IEEE spec here for reference
-# https://zepben.github.io/evolve/docs/2030-5/
+# Local imports
+from xcelEndpoint import xcelEndpoint, IEEE_PREFIX
 
 # Our target cipher is: ECDHE-ECDSA-AES128-CCM8
 # Security level 0 is required to allow CCM8 ciphers in OpenSSL 3.x
@@ -113,7 +113,7 @@ class xcelMeter():
         self.requests_session = self._setup_session(creds, ip_address)
 
         # Set to uninitialized
-        self.initalized = False
+        self.initialized = False
         # XML Entries we're looking for within the endpoint
         hw_info_names = ['lFDI', 'swVer', 'mfID']
         # Endpoint of the meter used for HW info
@@ -142,31 +142,36 @@ class xcelMeter():
         # create endpoints from list
         self.endpoints = self._create_endpoints(self.endpoints_list, self.device_info)
         # ready to go
-        self.initalized = True
+        self.initialized = True
 
     @staticmethod
     def _select_endpoint_version(supported_endpoint_versions: list, meter_sw_version: str) -> str:
-
-        # Sort the versions lowest to highest
-        supported_versions_sorted =  sorted(supported_endpoint_versions)
-
-        # Find the highest version of config that
-        selected_version = None
+        supported_versions_sorted = sorted(supported_endpoint_versions)
         meter_sw_version = Version(meter_sw_version)
+
+        # Prefer the highest config that is <= meter version with matching major.minor
+        selected_version = None
         for version in supported_versions_sorted:
-            if meter_sw_version < version:
+            if version > meter_sw_version:
                 continue
-            if meter_sw_version.major != version.major:
+            if version.major != meter_sw_version.major:
                 continue
-            if meter_sw_version.minor != version.minor:
+            if version.minor != meter_sw_version.minor:
                 continue
-            if meter_sw_version >= version:
-                selected_version = version
-        # Looks like we don't support a version this low, default to lowest supported?
+            selected_version = version
+
+        # No major.minor match — fall back to the highest config <= meter version
+        if selected_version is None:
+            for version in supported_versions_sorted:
+                if version <= meter_sw_version:
+                    selected_version = version
+
+        # Meter is older than every config — use the lowest available
         if selected_version is None:
             selected_version = supported_versions_sorted[0]
-            logger.error(f'Supported versions failed to find a match with meter version: {meter_sw_version}')
-            logger.error(f'Defaulting to using the lowest version for compatability: {selected_version}')
+            logger.error(f'Meter version {meter_sw_version} is older than any supported config')
+            logger.error(f'Defaulting to lowest available config: {selected_version}')
+
         config_version_path = str(selected_version).replace('.', '_')
         return config_version_path
 
@@ -196,7 +201,7 @@ class xcelMeter():
         Returns: request.session
         """
         session = requests.Session()
-        session.cert = creds
+        session.verify = False
         # Mount our adapter to the domain, passing the client cert/key
         # creds is a tuple of (cert_file, key_file)
         cert_file, key_file = creds
@@ -216,7 +221,7 @@ class xcelMeter():
 
         return endpoints
 
-    def _create_endpoints(self, endpoints: dict, device_info: dict) -> None:
+    def _create_endpoints(self, endpoints: list, device_info: dict) -> list[xcelEndpoint]:
         # Build query objects for each endpoint
         query_obj = []
         for point in endpoints:
@@ -252,9 +257,9 @@ class xcelMeter():
         """
         def on_connect(client, userdata, flags, rc):
             if rc == 0:
-                logging.info("Connected to MQTT Broker!")
+                logger.info("Connected to MQTT Broker!")
             else:
-                logging.error("Failed to connect, return code %d\n", rc)
+                logger.error("Failed to connect, return code %d\n", rc)
 
         # Check if a username/PW is setup for the MQTT connection
         mqtt_username = os.getenv('MQTT_USER')
@@ -264,12 +269,20 @@ class xcelMeter():
         if mqtt_username and mqtt_password:
             client.username_pw_set(mqtt_username, mqtt_password)
         client.on_connect = on_connect
-        logging.info(f"MQTT connection details:")
-        logging.info(f"MQTT_ADDRESS: {mqtt_server_address}")
-        logging.info(f"MQTT_PORT: {mqtt_port}")
-        logging.info(f"MQTT_USER: {mqtt_username}")
-        client.connect(mqtt_server_address, mqtt_port)
+        logger.info(f"MQTT connection details:")
+        logger.info(f"MQTT_ADDRESS: {mqtt_server_address}")
+        logger.info(f"MQTT_PORT: {mqtt_port}")
+        logger.info(f"MQTT_USER: {mqtt_username}")
+        client.connect_async(mqtt_server_address, mqtt_port)
         client.loop_start()
+
+        # Wait briefly for the connection so initial discovery payloads aren't lost
+        for _ in range(20):
+            if client.is_connected():
+                break
+            sleep(0.5)
+        else:
+            logger.warning("MQTT broker not connected after 10s — initial publishes may be dropped")
 
         return client
 
@@ -289,7 +302,8 @@ class xcelMeter():
 
         try:
             # query the hw specs endpoint
-            x = self.requests_session.get(query_url, verify=False, timeout=4.0)
+            x = self.requests_session.get(query_url, timeout=4.0)
+            x.raise_for_status()
             logger.debug(f"Successfully received response from meter")
         except requests.exceptions.SSLError as e:
             logger.error(f"SSL Error details:")
@@ -307,7 +321,10 @@ class xcelMeter():
         root = ET.fromstring(x.text)
         hw_info_dict = {}
         for name in hw_names:
-            hw_info_dict[name] = root.find(f'.//{IEEE_PREFIX}{name}').text
+            elem = root.find(f'.//{IEEE_PREFIX}{name}')
+            if elem is None or elem.text is None:
+                raise ValueError(f"Required field '{name}' missing from meter response at {query_url}")
+            hw_info_dict[name] = elem.text
 
         return hw_info_dict
 
@@ -327,17 +344,17 @@ class xcelMeter():
             }
         config_dict.update(self.device_info)
         config_json = json.dumps(config_dict)
-        logging.debug(f"Sending MQTT Discovery Payload")
+        logger.debug(f"Sending MQTT Discovery Payload")
 
         result = self.mqtt_client.publish(state_topic, str(config_json))
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            logging.debug(f"MQTT discovery payload published successfully (mid: {result.mid})")
-            logging.debug(f"TOPIC: {state_topic}")
-            logging.debug(f"Config: {config_json}")
+            logger.debug(f"MQTT discovery payload published successfully (mid: {result.mid})")
+            logger.debug(f"TOPIC: {state_topic}")
+            logger.debug(f"Config: {config_json}")
         elif result.rc == mqtt.MQTT_ERR_NO_CONN:
-            logging.error(f"MQTT publish failed: Not connected to broker")
+            logger.error(f"MQTT publish failed: Not connected to broker")
         else:
-            logging.error(f"MQTT publish failed with return code: {result.rc}")
+            logger.error(f"MQTT publish failed with return code: {result.rc}")
 
     def run(self) -> None:
         """

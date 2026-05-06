@@ -1,0 +1,13 @@
+[project]
+name = "xcel_itron2mqtt"
+version = "0.1.0"
+description = "Bridge for Xcel Itron 5 smart meter readings to MQTT"
+requires-python = ">=3.14"
+dependencies = [
+    "paho-mqtt<2",
+    "packaging",
+    "pyyaml",
+    "requests",
+    "tenacity",
+    "zeroconf",
+]
