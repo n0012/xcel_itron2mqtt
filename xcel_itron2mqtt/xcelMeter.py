@@ -4,6 +4,7 @@ import yaml
 import json
 import requests
 import logging
+import urllib3
 import paho.mqtt.client as mqtt
 import xml.etree.ElementTree as ET
 from time import sleep
@@ -13,6 +14,9 @@ from packaging.version import Version
 from requests.packages.urllib3.util.ssl_ import create_urllib3_context
 from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, before_sleep_log, wait_exponential
+
+# Meter uses a self-signed cert; verification is intentionally disabled at the session level
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Local imports
 from xcelEndpoint import xcelEndpoint, IEEE_PREFIX
@@ -197,7 +201,7 @@ class xcelMeter():
         Returns: request.session
         """
         session = requests.Session()
-        session.cert = creds
+        session.verify = False
         # Mount our adapter to the domain, passing the client cert/key
         # creds is a tuple of (cert_file, key_file)
         cert_file, key_file = creds
@@ -298,7 +302,7 @@ class xcelMeter():
 
         try:
             # query the hw specs endpoint
-            x = self.requests_session.get(query_url, verify=False, timeout=4.0)
+            x = self.requests_session.get(query_url, timeout=4.0)
             x.raise_for_status()
             logger.debug(f"Successfully received response from meter")
         except requests.exceptions.SSLError as e:
