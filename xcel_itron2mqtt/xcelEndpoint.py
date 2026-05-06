@@ -11,6 +11,7 @@ from tenacity import retry, stop_after_attempt, before_sleep_log, wait_exponenti
 logger = logging.getLogger(__name__)
 
 # Prefix that appears on all of the XML elements
+# IEEE 2030.5 spec reference: https://zepben.github.io/evolve/docs/2030-5/
 IEEE_PREFIX = '{urn:ieee:std:2030.5:ns}'
 
 class xcelEndpoint():
@@ -36,8 +37,8 @@ class xcelEndpoint():
         # Setup the rest of what we need for this endpoint
         self._mqtt_send_config()
 
-    @retry(stop=stop_after_attempt(15),
-           wait=wait_exponential(multiplier=1, min=1, max=15),
+    @retry(stop=stop_after_attempt(5),
+           wait=wait_exponential(multiplier=1, min=1, max=5),
            before_sleep=before_sleep_log(logger, logging.WARNING),
            reraise=True)
     def query_endpoint(self) -> str:
@@ -68,14 +69,14 @@ class xcelEndpoint():
                 for val_items in v:
                     for k2, v2 in val_items.items():
                         search_val = f'{IEEE_PREFIX}{k2}'
-                        if root.find(f'.//{search_val}') is not None:
-                            value = root.find(f'.//{search_val}').text
-                            readings_dict[f'{k}{k2}'] = value
+                        elem = root.find(f'.//{search_val}')
+                        if elem is not None:
+                            readings_dict[f'{k}{k2}'] = elem.text
             else:
                 search_val = f'{IEEE_PREFIX}{k}'
-                if root.find(f'.//{IEEE_PREFIX}{k}') is not None:
-                    value = root.find(f'.//{IEEE_PREFIX}{k}').text
-                    readings_dict[k] = value
+                elem = root.find(f'.//{search_val}')
+                if elem is not None:
+                    readings_dict[k] = elem.text
 
         return readings_dict
 
@@ -132,7 +133,6 @@ class xcelEndpoint():
                     # Send MQTT payload
                     self._mqtt_publish(mqtt_topic, str(payload))
             else:
-                name_suffix = f'{k[0].upper()}'
                 mqtt_topic, payload = self._create_config(k, v)
                 self._mqtt_publish(mqtt_topic, str(payload), retain=True)
 
@@ -148,9 +148,6 @@ class xcelEndpoint():
         for k, v in reading.items():
             # Figure out which topic this reading needs to be sent to
             topic = self._sensor_state_topics[k]
-            if topic not in mqtt_topic_message.keys():
-                mqtt_topic_message[topic] = {}
-            # Create dict of {topic: payload}
             mqtt_topic_message[topic] = v
 
         # Cycle through and send the payload to the associated keys
